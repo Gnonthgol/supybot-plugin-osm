@@ -1,7 +1,5 @@
 import os
 import time
-import datetime
-import calendar
 import urllib2
 from HTMLParser import HTMLParser
 
@@ -18,6 +16,8 @@ class DonationHTMLParser(HTMLParser):
         if tag == 'td':
             self.key = (self.key +1) % len(self.keys)
             self.value = ""
+        elif tag == 'br':
+            self.value += "\n"
     def handle_endtag(self, tag):
         if tag == 'td':
             self.object[self.keys[self.key]] = self.value.strip()
@@ -32,6 +32,7 @@ def toGBP(raw):
     urlPattern = 'http://finance.yahoo.com/d/quotes.csv?e=.csv&f=sl1d1t1&s=%sGBP=X'
     otherCur, otherValue = raw.split(' ')
     if not rateCache.has_key(otherCur):
+        print "Getting exchange rate for %s" % otherCur
         rateCache[otherCur] = float(urllib2.urlopen(urlPattern % otherCur).read().split(',')[1].replace(',', ''))
     return float(otherValue.replace(',', '')) * rateCache[otherCur]
 
@@ -70,7 +71,17 @@ while True:
         donations.reverse()
         for donation in donations:
             if donation['when'] > last_donation_date:
-                print "%s just donated %s to OSMF (%.2f GBP)" % (donation['name'], donation['amount'], toGBP(donation['amount']))
+                name = donation['name'].split('\n')
+                if name[0] == "Anonymous":
+                    name[0] = "A generous donor"
+                money = donation['amount']
+                gbp = "GBP %.2f" % toGBP(money)
+                if money != gbp:
+                    money += " (%s)" % gbp
+                if len(name) == 1:
+                    print "%s just donated %s to OSMF" % (name[0], money)
+                else:
+                    print "%s just donated %s to OSMF: %s" % (name[0], money, name[1])
                 last_donation_date = donation['when']
 
     except urllib2.URLError, e:
