@@ -24,6 +24,7 @@ import urllib
 import xml.etree.cElementTree as ElementTree
 import os
 import json
+from HTMLParser import HTMLParser
 
 
 stathat = None
@@ -91,6 +92,29 @@ class OscHandler():
             self.primitive = {}
 
 
+class DonationHTMLParser(HTMLParser):
+    donations = []
+    keys = ['name', 'when', 'amount']
+    key = -1
+    value = ""
+    object = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'td':
+            self.key = (self.key +1) % len(self.keys)
+            self.value = ""
+        elif tag == 'br':
+            self.value += "\n"
+    def handle_endtag(self, tag):
+        if tag == 'td':
+            self.object[self.keys[self.key]] = self.value.strip()
+            if self.key +1 == len(self.keys):
+                self.donations.append(self.object)
+                self.object = {}
+    def handle_data(self, data):
+        self.value += data
+
+
 def isoToTimestamp(isotime):
     t = datetime.datetime.strptime(isotime, "%Y-%m-%dT%H:%M:%SZ")
     return calendar.timegm(t.utctimetuple())
@@ -100,6 +124,16 @@ def pubdateToTimestamp(pubdate):
     # Wed, 01 May 2013 18:51:34 +0000
     t = datetime.datetime.strptime(pubdate, "%a, %d %B %Y %H:%M:%S +0000")
     return calendar.timegm(t.utctimetuple())
+
+
+exchangeRateCache = {'GBP':1.0}
+def toGBP(raw):
+    urlPattern = 'http://finance.yahoo.com/d/quotes.csv?e=.csv&f=sl1d1t1&s=%sGBP=X'
+    currency, value = raw.split(' ')
+    log.info("Getting currency for %s" % currency)
+    if not exchangeRateCache.has_key(currency):
+        exchangeRateCache[currency] = float(urllib2.urlopen(urlPattern % currency).read().split(',')[1].replace(',', ''))
+    return float(value.replace(',', '')) * exchangeRateCache[currency]
 
 
 def parseOsm(source, handler):
@@ -172,11 +206,13 @@ class OSM(callbacks.Plugin):
         log.info('Start polling.')
         schedule.addPeriodicEvent(self._minutely_diff_poll, 60, now=True, name='minutely_poll')
         schedule.addPeriodicEvent(self._notes_rss_poll, 60, now=True, name='notes_rss_poll')
+        schedule.addPeriodicEvent(self._donations_poll, 60, now=True, name='donations_poll')
 
     def _stop_polling(self):
         log.info('Stop polling.')
         schedule.removeEvent('minutely_poll')
         schedule.removeEvent('notes_rss_poll')
+        schedule.removeEvent('donations_poll')
 
     def readState(self, filename):
         # Read the state.txt
@@ -298,6 +334,61 @@ class OSM(callbacks.Plugin):
 
         except Exception as e:
             log.error("Exception processing new notes: %s" % traceback.format_exc(e))
+
+    def _donations_poll(self):
+        url = 'http://donate.osm.org/comments/'
+
+        try:
+            if not os.path.exists('donation_state.txt'):
+                log.error("No donation_state file found to poll donation feed.")
+                return
+
+            notes_state = self.readState('donation_state.txt')
+            last_donation_date = notes_state.get('last_donation_date', None)
+
+            try:
+                parser = DonationHTMLParser()
+                result = urllib2.urlopen(url)
+                for data in result:
+                    parser.feed(data)
+                result.close()
+
+                donations = parser.donations
+                donations.reverse()
+                for donation in donations:
+                    if donation['when'] > last_donation_date:
+                        log.info(donation['when'])
+                        name = donation['name'].split('\n')
+                        if name[0] == "Anonymous":
+                            name[0] = "A generous donor"
+
+                        money = donation['amount']
+                        gbp = "GBP %.2f" % toGBP(money)
+                        if money != gbp:
+                            money += " (%s)" % gbp
+
+                        response = ""
+                        if len(name) == 1:
+                            response = "%s just donated %s to OSMF" % (name[0], money)
+                        else:
+                            response = "%s just donated %s to OSMF: %s" % (name[0], money, name[1])
+
+                        irc = world.ircs[0]
+                        for chan in irc.state.channels:
+                            if chan in ["#osm", "#osm-bot"]:
+                                msg = ircmsgs.privmsg(chan, response)
+                                world.ircs[0].queueMsg(msg)
+
+                               last_donation_date = donation['when']
+
+            except urllib2.URLError, e:
+                print "Error getting donation page"
+
+            with open('donation_state.txt', 'w') as f:
+                f.write('last_donation_date=%s\n' % last_donation_date)
+
+        except Exception as e:
+            log.error("Exception processing new donations: %s" % traceback.format_exc(e))
 
     def _minutely_diff_poll(self):
         try:
